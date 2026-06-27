@@ -299,8 +299,23 @@
       font-weight: 600;
     }
 
-    /* Responsive */
-    @media (max-width: 380px) {
+    /* Edit modal */
+    .edit-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.45); z-index: 200;
+      display: none; align-items: center; justify-content: center;
+    }
+    .edit-overlay.show { display: flex; }
+    .edit-dialog {
+      background: white; border-radius: 20px; padding: 24px 20px;
+      width: 320px;
+    }
+    .edit-dialog h3 { font-size: 17px; color: #D63384; margin-bottom: 16px; text-align:center; }
+    .edit-dialog .form-group { margin-bottom: 12px; }
+    .edit-actions { display: flex; gap: 10px; margin-top: 16px; }
+    .edit-actions .btn { flex: 1; padding: 12px; font-size: 14px; }
+    .btn-danger { background: #fff0f0; color: #e74c3c; border: 1.5px solid #fdd; }
+    .btn-danger:active { background: #fdd; }
       .form-row { flex-direction: column; gap: 8px; }
       .stats-row { gap: 6px; }
       .stat-value { font-size: 22px; }
@@ -474,6 +489,37 @@
   </div>
 
   <div class="toast" id="toast"></div>
+
+  <!-- Edit modal -->
+  <div class="edit-overlay" id="editOverlay">
+    <div class="edit-dialog">
+      <h3>✏️ 编辑记录</h3>
+      <input type="hidden" id="editId">
+      <div class="form-row">
+        <div class="form-group">
+          <label>日期</label>
+          <input type="date" id="editDate">
+        </div>
+        <div class="form-group">
+          <label>时间</label>
+          <input type="time" id="editTime">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>喝奶量 (ml)</label>
+        <input type="number" id="editMl" min="1" max="500" inputmode="numeric">
+      </div>
+      <div class="form-group">
+        <label>备注</label>
+        <textarea id="editNote" style="resize:none;height:56px"></textarea>
+      </div>
+      <div class="edit-actions">
+        <button class="btn btn-danger btn-sm" id="btnEditDelete">🗑️ 删除</button>
+        <button class="btn btn-outline btn-sm" id="btnEditCancel">取消</button>
+        <button class="btn btn-primary btn-sm" id="btnEditSave">保存</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Lock status indicator -->
   <div class="lock-status" id="lockStatus" onclick="showLockDialog()">
@@ -649,6 +695,79 @@
       await saveRecords(records);
     }
 
+    async function updateRecord(id, dateStr, timeStr, ml, note) {
+      let records = await loadRecords();
+      const idx = records.findIndex(r => r.id === id);
+      if (idx === -1) throw new Error('记录不存在');
+      const dt = new Date(dateStr + 'T' + timeStr + ':00');
+      records[idx] = { id, time: dt.toISOString(), ml: parseInt(ml), note: note || '' };
+      await saveRecords(records);
+    }
+
+    // ==================== 编辑弹窗 ====================
+    async function openEditModal(id) {
+      const records = await loadRecords();
+      const r = records.find(r => r.id === id);
+      if (!r) return;
+
+      const d = new Date(r.time);
+      document.getElementById('editId').value = id;
+      document.getElementById('editDate').value =
+        d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+      document.getElementById('editTime').value =
+        String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+      document.getElementById('editMl').value = r.ml;
+      document.getElementById('editNote').value = r.note || '';
+
+      document.getElementById('editOverlay').classList.add('show');
+    }
+
+    function closeEditModal() {
+      document.getElementById('editOverlay').classList.remove('show');
+    }
+
+    document.getElementById('btnEditCancel').addEventListener('click', closeEditModal);
+    document.getElementById('editOverlay').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('editOverlay')) closeEditModal();
+    });
+
+    document.getElementById('btnEditSave').addEventListener('click', async () => {
+      const id = parseInt(document.getElementById('editId').value);
+      const date = document.getElementById('editDate').value;
+      const time = document.getElementById('editTime').value;
+      const ml = document.getElementById('editMl').value;
+      const note = document.getElementById('editNote').value;
+      if (!date || !time) { showToast('请填写日期和时间'); return; }
+      if (!ml || parseInt(ml) <= 0) { showToast('请填写喝奶量'); return; }
+      showToast('⏳ 保存中...');
+      try {
+        await updateRecord(id, date, time, ml, note);
+        closeEditModal();
+        _recordsCache = null;
+        await refreshAll();
+        showToast('✅ 已保存');
+      } catch (err) {
+        console.error(err);
+        showToast('❌ 保存失败，请重试');
+      }
+    });
+
+    document.getElementById('btnEditDelete').addEventListener('click', async () => {
+      const id = parseInt(document.getElementById('editId').value);
+      if (!confirm('确认删除这条记录？')) return;
+      showToast('⏳ 删除中...');
+      try {
+        await deleteRecord(id);
+        closeEditModal();
+        _recordsCache = null;
+        await refreshAll();
+        showToast('已删除');
+      } catch (err) {
+        console.error(err);
+        showToast('❌ 删除失败，请重试');
+      }
+    });
+
     async function getRecordsByDate(dateStr) {
       const records = await loadRecords();
       return records.filter(r => {
@@ -774,12 +893,23 @@
       records.sort((a, b) => new Date(a.time) - new Date(b.time));
 
       container.innerHTML = records.map(r => `
-        <div class="record-item">
+        <div class="record-item" style="cursor:${isUnlocked() ? 'pointer' : 'default'}" data-id="${r.id}">
           <span class="record-time">${timeStr(r.time)}</span>
           <span class="record-ml">${r.ml}<span class="record-unit">ml</span></span>
           <span class="record-note">${r.note || ''}</span>
+          ${isUnlocked() ? `<button class="record-delete" style="color:#FF69B4;font-size:14px;padding:4px 8px" data-id="${r.id}">✏️</button>` : ''}
         </div>
       `).join('');
+
+      if (!isUnlocked()) return;
+
+      container.querySelectorAll('.record-delete').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const id = parseInt(btn.dataset.id);
+          openEditModal(id);
+        });
+      });
     }
 
     function changeHistoryDate(delta) {
