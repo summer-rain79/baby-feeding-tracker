@@ -485,31 +485,40 @@
   <div class="lock-overlay" id="lockOverlay">
     <div class="lock-dialog">
       <h2>🔐 编辑验证</h2>
-      <div class="lock-hint">请输入密码以解锁编辑权限</div>
+      <div class="lock-hint">输入密码解锁编辑，输入 Token 可启用云同步</div>
       <input type="password" id="lockInput" placeholder="请输入密码" autofocus>
+      <div id="lockTokenHint" style="font-size:10px;color:#bbb;margin-top:-8px;margin-bottom:10px">
+        💡 首次使用需输入 GitHub Token 启用云存储
+      </div>
       <button class="btn btn-primary" id="btnUnlock">解锁</button>
       <button class="btn-skip" id="btnSkip">仅查看，不解锁</button>
-      <div id="lockError" style="color:#e74c3c;font-size:12px;margin-top:8px;display:none">密码错误，请重试</div>
+      <div id="lockError" style="color:#e74c3c;font-size:12px;margin-top:8px;display:none"></div>
     </div>
   </div>
 
   <script>
-    // ==================== 权限验证 ====================
+    // ==================== 权限验证 + 云存储 ====================
     const LOCK_PASSWORD = '123456';
-    const LOCK_STORAGE_KEY = 'baby_feeding_unlocked';
+    const GIST_RAW_URL = 'https://gist.githubusercontent.com/summer-rain79/7246fd7ab21a4ec0ab62453dc39345af/raw/records.json';
+    const GIST_API_URL = 'https://api.github.com/gists/7246fd7ab21a4ec0ab62453dc39345af';
+
+    let _recordsCache = null;
+    let _ghToken = sessionStorage.getItem('bf_gh_token') || '';
 
     function isUnlocked() {
-      return sessionStorage.getItem(LOCK_STORAGE_KEY) === 'true';
+      return sessionStorage.getItem('baby_feeding_unlocked') === 'true';
     }
 
     function setUnlocked(val) {
       if (val) {
-        sessionStorage.setItem(LOCK_STORAGE_KEY, 'true');
+        sessionStorage.setItem('baby_feeding_unlocked', 'true');
         document.body.classList.remove('locked');
         document.getElementById('lockDot').className = 'dot unlocked';
         document.getElementById('lockText').textContent = '🔓 已解锁';
       } else {
-        sessionStorage.removeItem(LOCK_STORAGE_KEY);
+        sessionStorage.removeItem('baby_feeding_unlocked');
+        sessionStorage.removeItem('bf_gh_token');
+        _ghToken = '';
         document.body.classList.add('locked');
         document.getElementById('lockDot').className = 'dot locked';
         document.getElementById('lockText').textContent = '🔒 已锁定';
@@ -527,16 +536,52 @@
       document.getElementById('lockOverlay').style.display = 'none';
     }
 
-    document.getElementById('btnUnlock').addEventListener('click', () => {
+    document.getElementById('btnUnlock').addEventListener('click', async () => {
       const pw = document.getElementById('lockInput').value;
+      const errEl = document.getElementById('lockError');
+
+      // 判断输入的是密码还是 Token
+      if (pw.startsWith('ghp_') || pw.startsWith('github_pat_')) {
+        // 输入的是 Token
+        errEl.style.display = 'block';
+        errEl.textContent = '⏳ 验证 Token...';
+        try {
+          const res = await fetch('https://api.github.com/user', {
+            headers: { 'Authorization': `Bearer ${pw}`, 'Accept': 'application/vnd.github+json' }
+          });
+          if (res.ok) {
+            _ghToken = pw;
+            sessionStorage.setItem('bf_gh_token', pw);
+            setUnlocked(true);
+            hideLockDialog();
+            await loadRecords();
+            await refreshAll();
+            showToast('✅ 已解锁，云同步已启用');
+            return;
+          } else {
+            errEl.textContent = '❌ Token 无效，请检查后重试';
+            return;
+          }
+        } catch (e) {
+          errEl.textContent = '❌ 网络错误，请重试';
+          return;
+        }
+      }
+
+      // 输入的是密码
       if (pw === LOCK_PASSWORD) {
+        if (!_ghToken) {
+          errEl.style.display = 'block';
+          errEl.textContent = '⚠️ 请粘贴 GitHub Token 以启用云存储';
+          return;
+        }
         setUnlocked(true);
         hideLockDialog();
         showToast('✅ 已解锁，可以编辑了');
+        await refreshAll();
       } else {
-        document.getElementById('lockError').style.display = 'block';
-        document.getElementById('lockInput').value = '';
-        document.getElementById('lockInput').focus();
+        errEl.style.display = 'block';
+        errEl.textContent = '密码错误，或请输入 GitHub Token';
       }
     });
 
@@ -549,23 +594,45 @@
       showToast('当前为只读模式');
     });
 
-    // 进入页面先弹窗
-    showLockDialog();
+    // ==================== 数据管理（Gist 云存储） ====================
 
-    // ==================== 数据管理 ====================
-    const STORAGE_KEY = 'baby_feeding_records';
-
-    function loadRecords() {
-      try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
-      catch { return []; }
+    async function loadRecords() {
+      if (_recordsCache) return _recordsCache;
+      try {
+        const res = await fetch(GIST_RAW_URL + '?t=' + Date.now());
+        if (!res.ok) throw new Error('fetch failed');
+        _recordsCache = await res.json();
+        return _recordsCache;
+      } catch (e) {
+        _recordsCache = [];
+        return _recordsCache;
+      }
     }
 
-    function saveRecords(records) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    async function saveRecords(records) {
+      if (!_ghToken) throw new Error('no token');
+      const json = JSON.stringify(records, null, 2);
+      const content = btoa(unescape(encodeURIComponent(json)));
+      const res = await fetch(GIST_API_URL, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${_ghToken}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          files: { 'records.json': { content: json } }
+        })
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`保存失败: ${res.status} ${err}`);
+      }
+      _recordsCache = records;
     }
 
-    function addRecord(dateStr, timeStr, ml, note) {
-      const records = loadRecords();
+    async function addRecord(dateStr, timeStr, ml, note) {
+      const records = await loadRecords();
       const dt = new Date(dateStr + 'T' + timeStr + ':00');
       records.push({
         id: Date.now(),
@@ -573,17 +640,18 @@
         ml: parseInt(ml),
         note: note || ''
       });
-      saveRecords(records);
+      await saveRecords(records);
     }
 
-    function deleteRecord(id) {
-      let records = loadRecords();
+    async function deleteRecord(id) {
+      let records = await loadRecords();
       records = records.filter(r => r.id !== id);
-      saveRecords(records);
+      await saveRecords(records);
     }
 
-    function getRecordsByDate(dateStr) {
-      return loadRecords().filter(r => {
+    async function getRecordsByDate(dateStr) {
+      const records = await loadRecords();
+      return records.filter(r => {
         const d = new Date(r.time);
         const s = d.getFullYear() + '/' +
           String(d.getMonth() + 1).padStart(2, '0') + '/' +
@@ -620,9 +688,9 @@
       setTimeout(() => t.classList.remove('show'), 1800);
     }
 
-    function updateTodayStats() {
+    async function updateTodayStats() {
       const today = getTodayStr();
-      const records = getRecordsByDate(today);
+      const records = await getRecordsByDate(today);
       const count = records.length;
       const total = records.reduce((s, r) => s + r.ml, 0);
       const avg = count > 0 ? Math.round(total / count) : '-';
@@ -633,9 +701,9 @@
       document.getElementById('todayLabel').textContent = formatDateLabel(today);
     }
 
-    function renderTodayRecords() {
+    async function renderTodayRecords() {
       const today = getTodayStr();
-      const records = getRecordsByDate(today);
+      const records = await getRecordsByDate(today);
       const container = document.getElementById('todayRecords');
 
       if (records.length === 0) {
@@ -662,12 +730,18 @@
       if (!isUnlocked()) return;
       // 删除按钮
       container.querySelectorAll('.record-delete').forEach(btn => {
-        btn.addEventListener('click', (e) => {
+        btn.addEventListener('click', async (e) => {
           e.stopPropagation();
           if (confirm('确认删除这条记录？')) {
-            deleteRecord(parseInt(btn.dataset.id));
-            refreshAll();
-            showToast('已删除');
+            showToast('⏳ 删除中...');
+            try {
+              await deleteRecord(parseInt(btn.dataset.id));
+              await refreshAll();
+              showToast('已删除');
+            } catch (err) {
+              console.error(err);
+              showToast('❌ 删除失败，请重试');
+            }
           }
         });
       });
@@ -676,8 +750,8 @@
     // ==================== 历史页 ====================
     let historyDate = getTodayStr();
 
-    function renderHistory() {
-      const records = getRecordsByDate(historyDate);
+    async function renderHistory() {
+      const records = await getRecordsByDate(historyDate);
       const container = document.getElementById('historyRecords');
       const count = records.length;
       const total = records.reduce((s, r) => s + r.ml, 0);
@@ -719,7 +793,7 @@
     }
 
     // ==================== 统计页 ====================
-    function renderChart() {
+    async function renderChart() {
       const container = document.getElementById('weekChart');
       const days = [];
       const today = new Date();
@@ -730,7 +804,7 @@
         const str = d.getFullYear() + '/' +
           String(d.getMonth() + 1).padStart(2, '0') + '/' +
           String(d.getDate()).padStart(2, '0');
-        const records = getRecordsByDate(str);
+        const records = await getRecordsByDate(str);
         const total = records.reduce((s, r) => s + r.ml, 0);
         days.push({
           label: (d.getMonth() + 1) + '/' + d.getDate(),
@@ -750,7 +824,7 @@
       }).join('');
 
       // 累计统计
-      const allRecords = loadRecords();
+      const allRecords = await loadRecords();
       const daySet = new Set();
       allRecords.forEach(r => {
         const d = new Date(r.time);
@@ -768,8 +842,8 @@
       document.getElementById('allAvg').textContent = allAvg;
     }
 
-    function exportExcel() {
-      const records = loadRecords();
+    async function exportExcel() {
+      const records = await loadRecords();
       if (records.length === 0) {
         showToast('暂无数据可导出');
         return;
@@ -798,11 +872,11 @@
     }
 
     // ==================== 刷新全部 ====================
-    function refreshAll() {
-      updateTodayStats();
-      renderTodayRecords();
-      renderHistory();
-      renderChart();
+    async function refreshAll() {
+      await updateTodayStats();
+      await renderTodayRecords();
+      await renderHistory();
+      await renderChart();
     }
 
     // ==================== 事件绑定 ====================
@@ -821,7 +895,7 @@
     });
 
     // 添加记录
-    document.getElementById('btnAdd').addEventListener('click', () => {
+    document.getElementById('btnAdd').addEventListener('click', async () => {
       if (!isUnlocked()) { showLockDialog(); return; }
 
       const date = document.getElementById('inputDate').value;
@@ -840,12 +914,17 @@
         return;
       }
 
-      addRecord(date, time, ml, note);
-      document.getElementById('inputMl').value = '';
-      document.getElementById('inputNote').value = '';
-      // 保留日期，只更新时间
-      refreshAll();
-      showToast('✅ 已记录！');
+      showToast('⏳ 保存中...');
+      try {
+        await addRecord(date, time, ml, note);
+        document.getElementById('inputMl').value = '';
+        document.getElementById('inputNote').value = '';
+        await refreshAll();
+        showToast('✅ 已记录！');
+      } catch (e) {
+        console.error(e);
+        showToast('❌ 保存失败，请重试');
+      }
     });
 
     // 快捷输入：回车提交
@@ -865,12 +944,18 @@
       if (!isUnlocked()) { showLockDialog(); return; }
       exportExcel();
     });
-    document.getElementById('btnClear').addEventListener('click', () => {
+    document.getElementById('btnClear').addEventListener('click', async () => {
       if (!isUnlocked()) { showLockDialog(); return; }
       if (confirm('确认清空所有喂奶记录？此操作不可恢复！')) {
-        localStorage.removeItem(STORAGE_KEY);
-        refreshAll();
-        showToast('已清空');
+        showToast('⏳ 清空中...');
+        try {
+          await saveRecords([]);
+          await refreshAll();
+          showToast('已清空');
+        } catch (err) {
+          console.error(err);
+          showToast('❌ 清空失败，请重试');
+        }
       }
     });
 
@@ -888,7 +973,17 @@
 
     // 初始化
     initDateTime();
-    refreshAll();
+    showLockDialog();
+
+    // 后台加载数据（无需 Token 也可查看）
+    (async () => {
+      try {
+        await loadRecords();
+        await refreshAll();
+      } catch (e) {
+        console.error('初始加载失败:', e);
+      }
+    })();
   </script>
 </body>
 </html>
