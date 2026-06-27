@@ -1080,9 +1080,28 @@
     initDateTime();
     showLockDialog();
 
-    // 后台加载数据（无需 Token 也可查看）
+    // 后台加载数据，首次自动从旧 Gist 迁移
     (async () => {
       try {
+        // 如果没有云存储 ID，尝试从旧 Gist 迁移历史数据
+        if (!localStorage.getItem('bf_storage_id')) {
+          const migrated = localStorage.getItem('bf_data_migrated');
+          if (!migrated) {
+            try {
+              const res = await fetch('https://gist.githubusercontent.com/summer-rain79/7246fd7ab21a4ec0ab62453dc39345af/raw/records.json');
+              if (res.ok) {
+                const oldData = await res.json();
+                if (Array.isArray(oldData) && oldData.length > 0) {
+                  _recordsCache = oldData;
+                  // 首次保存会创建云存储
+                  await saveRecords(oldData);
+                  showToast('✅ 已迁移 ' + oldData.length + ' 条历史记录');
+                }
+              }
+            } catch (e) { /* Gist 不可达，跳过 */ }
+            localStorage.setItem('bf_data_migrated', '1');
+          }
+        }
         await loadRecords();
         await refreshAll();
       } catch (e) {
