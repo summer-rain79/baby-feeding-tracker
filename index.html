@@ -531,11 +531,8 @@
   <div class="lock-overlay" id="lockOverlay">
     <div class="lock-dialog">
       <h2>🔐 编辑验证</h2>
-      <div class="lock-hint">输入密码解锁编辑，输入 Token 可启用云同步</div>
+      <div class="lock-hint">请输入密码以解锁编辑权限</div>
       <input type="password" id="lockInput" placeholder="请输入密码" autofocus>
-      <div id="lockTokenHint" style="font-size:10px;color:#bbb;margin-top:-8px;margin-bottom:10px">
-        💡 首次使用需输入 GitHub Token 启用云存储
-      </div>
       <button class="btn btn-primary" id="btnUnlock">解锁</button>
       <button class="btn-skip" id="btnSkip">仅查看，不解锁</button>
       <div id="lockError" style="color:#e74c3c;font-size:12px;margin-top:8px;display:none"></div>
@@ -545,11 +542,12 @@
   <script>
     // ==================== 权限验证 + 云存储 ====================
     const LOCK_PASSWORD = '123456';
-    const GIST_RAW_URL = 'https://gist.githubusercontent.com/summer-rain79/7246fd7ab21a4ec0ab62453dc39345af/raw/records.json';
-    const GIST_API_URL = 'https://api.github.com/gists/7246fd7ab21a4ec0ab62453dc39345af';
+    // jsonstorage.net 免费免注册 JSON 存储
+    const API_BASE = 'https://api.jsonstorage.net/v1/json';
+    // 已预先创建的存储 ID（首次 POST 后获得）
+    const STORAGE_ID = sessionStorage.getItem('bf_storage_id') || '';
 
     let _recordsCache = null;
-    let _ghToken = sessionStorage.getItem('bf_gh_token') || '';
 
     function isUnlocked() {
       return sessionStorage.getItem('baby_feeding_unlocked') === 'true';
@@ -563,8 +561,6 @@
         document.getElementById('lockText').textContent = '🔓 已解锁';
       } else {
         sessionStorage.removeItem('baby_feeding_unlocked');
-        sessionStorage.removeItem('bf_gh_token');
-        _ghToken = '';
         document.body.classList.add('locked');
         document.getElementById('lockDot').className = 'dot locked';
         document.getElementById('lockText').textContent = '🔒 已锁定';
@@ -584,50 +580,15 @@
 
     document.getElementById('btnUnlock').addEventListener('click', async () => {
       const pw = document.getElementById('lockInput').value;
-      const errEl = document.getElementById('lockError');
-
-      // 判断输入的是密码还是 Token
-      if (pw.startsWith('ghp_') || pw.startsWith('github_pat_')) {
-        // 输入的是 Token
-        errEl.style.display = 'block';
-        errEl.textContent = '⏳ 验证 Token...';
-        try {
-          const res = await fetch('https://api.github.com/user', {
-            headers: { 'Authorization': `Bearer ${pw}`, 'Accept': 'application/vnd.github+json' }
-          });
-          if (res.ok) {
-            _ghToken = pw;
-            sessionStorage.setItem('bf_gh_token', pw);
-            setUnlocked(true);
-            hideLockDialog();
-            await loadRecords();
-            await refreshAll();
-            showToast('✅ 已解锁，云同步已启用');
-            return;
-          } else {
-            errEl.textContent = '❌ Token 无效，请检查后重试';
-            return;
-          }
-        } catch (e) {
-          errEl.textContent = '❌ 网络错误，请重试';
-          return;
-        }
-      }
-
-      // 输入的是密码
       if (pw === LOCK_PASSWORD) {
-        if (!_ghToken) {
-          errEl.style.display = 'block';
-          errEl.textContent = '⚠️ 请粘贴 GitHub Token 以启用云存储';
-          return;
-        }
         setUnlocked(true);
         hideLockDialog();
         showToast('✅ 已解锁，可以编辑了');
         await refreshAll();
       } else {
+        const errEl = document.getElementById('lockError');
         errEl.style.display = 'block';
-        errEl.textContent = '密码错误，或请输入 GitHub Token';
+        errEl.textContent = '密码错误，请重试';
       }
     });
 
@@ -640,14 +601,25 @@
       showToast('当前为只读模式');
     });
 
-    // ==================== 数据管理（Gist 云存储） ====================
+    // ==================== 数据管理（jsonstorage.net 云存储） ====================
+    // 用 localStorage 存 storage_id，实现跨会话共享
+    let _storageId = localStorage.getItem('bf_storage_id') || '';
 
     async function loadRecords() {
       if (_recordsCache) return _recordsCache;
+      // 如果没有 storage_id，说明还没有数据
+      if (!_storageId) {
+        _recordsCache = [];
+        return _recordsCache;
+      }
       try {
-        const res = await fetch(GIST_RAW_URL + '?t=' + Date.now());
-        if (!res.ok) throw new Error('fetch failed');
+        const res = await fetch(`${API_BASE}/${_storageId}?t=${Date.now()}`);
+        if (!res.ok) {
+          _recordsCache = [];
+          return _recordsCache;
+        }
         _recordsCache = await res.json();
+        if (!Array.isArray(_recordsCache)) _recordsCache = [];
         return _recordsCache;
       } catch (e) {
         _recordsCache = [];
@@ -656,25 +628,28 @@
     }
 
     async function saveRecords(records) {
-      if (!_ghToken) throw new Error('no token');
-      const json = JSON.stringify(records, null, 2);
-      const content = btoa(unescape(encodeURIComponent(json)));
-      const res = await fetch(GIST_API_URL, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${_ghToken}`,
-          'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          files: { 'records.json': { content: json } }
-        })
-      });
-      if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`保存失败: ${res.status} ${err}`);
-      }
       _recordsCache = records;
+      if (_storageId) {
+        // 更新已存在的存储
+        const res = await fetch(`${API_BASE}/${_storageId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(records)
+        });
+        if (!res.ok) throw new Error(`保存失败: ${res.status}`);
+        return;
+      }
+      // 首次创建
+      const res = await fetch(API_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(records)
+      });
+      if (!res.ok) throw new Error(`创建失败: ${res.status}`);
+      const data = await res.json();
+      // 从 uri 中提取 id: /v1/json/{userId}/{itemId}
+      _storageId = data.uri.split('/').slice(-2).join('/');
+      localStorage.setItem('bf_storage_id', _storageId);
     }
 
     async function addRecord(dateStr, timeStr, ml, note) {
