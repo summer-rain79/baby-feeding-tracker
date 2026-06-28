@@ -542,10 +542,8 @@
   <script>
     // ==================== 权限验证 + 云存储 ====================
     const LOCK_PASSWORD = '123456';
-    // jsonstorage.net 免费免注册 JSON 存储
-    const API_BASE = 'https://api.jsonstorage.net/v1/json';
-    // 已预先创建的存储 ID（首次 POST 后获得）
-    const STORAGE_ID = sessionStorage.getItem('bf_storage_id') || '';
+    // MantleDB 免费云存储，无需注册无需 Token
+    // 首次保存时自动声明 namespace 获取写保护 key
 
     let _recordsCache = null;
 
@@ -601,24 +599,35 @@
       showToast('当前为只读模式');
     });
 
-    // ==================== 数据管理（jsonstorage.net 云存储） ====================
-    // 用 localStorage 存 storage_id，实现跨会话共享
-    let _storageId = localStorage.getItem('bf_storage_id') || '';
+    // ==================== 数据管理（MantleDB 云存储，免费免注册） ====================
+    const DB_NS = 'baby-feeding-tracker';  // namespace
+    const DB_PATH = 'records';              // 数据路径
+    const DB_URL = `https://mantledb.sh/v2/${DB_NS}/${DB_PATH}`;
+
+    // 首次使用时声明 namespace 获取写保护 key
+    let _dbKey = localStorage.getItem('bf_db_key') || '';
+
+    async function ensureDbKey() {
+      if (_dbKey) return _dbKey;
+      try {
+        const res = await fetch(`https://mantledb.sh/v2/claim/${DB_NS}`);
+        const data = await res.json();
+        if (data.key) {
+          _dbKey = data.key;
+          localStorage.setItem('bf_db_key', _dbKey);
+        }
+      } catch (e) { /* 可能已被声明 */ }
+      return _dbKey;
+    }
 
     async function loadRecords() {
       if (_recordsCache) return _recordsCache;
-      // 如果没有 storage_id，说明还没有数据
-      if (!_storageId) {
-        _recordsCache = [];
-        return _recordsCache;
-      }
       try {
-        const res = await fetch(`${API_BASE}/${_storageId}?t=${Date.now()}`);
-        if (!res.ok) {
-          _recordsCache = [];
-          return _recordsCache;
-        }
-        _recordsCache = await res.json();
+        const res = await fetch(`${DB_URL}?t=${Date.now()}`);
+        if (!res.ok) { _recordsCache = []; return _recordsCache; }
+        const text = await res.text();
+        if (!text || text.trim() === 'null') { _recordsCache = []; return _recordsCache; }
+        _recordsCache = JSON.parse(text);
         if (!Array.isArray(_recordsCache)) _recordsCache = [];
         return _recordsCache;
       } catch (e) {
@@ -629,27 +638,18 @@
 
     async function saveRecords(records) {
       _recordsCache = records;
-      if (_storageId) {
-        // 更新已存在的存储
-        const res = await fetch(`${API_BASE}/${_storageId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(records)
-        });
-        if (!res.ok) throw new Error(`保存失败: ${res.status}`);
-        return;
-      }
-      // 首次创建
-      const res = await fetch(API_BASE, {
+      await ensureDbKey();
+      const headers = { 'Content-Type': 'application/json' };
+      if (_dbKey) headers['X-Mantle-Key'] = _dbKey;
+      const res = await fetch(DB_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(records)
       });
-      if (!res.ok) throw new Error(`创建失败: ${res.status}`);
-      const data = await res.json();
-      // 从 uri 中提取 id: /v1/json/{userId}/{itemId}
-      _storageId = data.uri.split('/').slice(-2).join('/');
-      localStorage.setItem('bf_storage_id', _storageId);
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`保存失败: ${res.status} ${err}`);
+      }
     }
 
     async function addRecord(dateStr, timeStr, ml, note) {
@@ -1080,28 +1080,9 @@
     initDateTime();
     showLockDialog();
 
-    // 后台加载数据，首次自动从旧 Gist 迁移
+    // 后台加载数据
     (async () => {
       try {
-        // 如果没有云存储 ID，尝试从旧 Gist 迁移历史数据
-        if (!localStorage.getItem('bf_storage_id')) {
-          const migrated = localStorage.getItem('bf_data_migrated');
-          if (!migrated) {
-            try {
-              const res = await fetch('https://gist.githubusercontent.com/summer-rain79/7246fd7ab21a4ec0ab62453dc39345af/raw/records.json');
-              if (res.ok) {
-                const oldData = await res.json();
-                if (Array.isArray(oldData) && oldData.length > 0) {
-                  _recordsCache = oldData;
-                  // 首次保存会创建云存储
-                  await saveRecords(oldData);
-                  showToast('✅ 已迁移 ' + oldData.length + ' 条历史记录');
-                }
-              }
-            } catch (e) { /* Gist 不可达，跳过 */ }
-            localStorage.setItem('bf_data_migrated', '1');
-          }
-        }
         await loadRecords();
         await refreshAll();
       } catch (e) {
