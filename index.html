@@ -532,7 +532,7 @@
     <div class="lock-dialog">
       <h2>🔐 编辑验证</h2>
       <div class="lock-hint">请输入密码以解锁编辑权限</div>
-      <input type="password" id="lockInput" placeholder="请输入密码" autofocus>
+      <input type="password" id="lockInput" placeholder="密码 或 GitHub Token">
       <button class="btn btn-primary" id="btnUnlock">解锁</button>
       <button class="btn-skip" id="btnSkip">仅查看，不解锁</button>
       <div id="lockError" style="color:#e74c3c;font-size:12px;margin-top:8px;display:none"></div>
@@ -542,10 +542,16 @@
   <script>
     // ==================== 权限验证 + 云存储 ====================
     const LOCK_PASSWORD = '123456';
-    // MantleDB 免费云存储，无需注册无需 Token
-    // 首次保存时自动声明 namespace 获取写保护 key
-
+    // Token 存 localStorage，一次输入永久保存
+    let _ghToken = localStorage.getItem('bf_gh_token') || '';
     let _recordsCache = null;
+    let _fileSha = '';
+
+    const GH_OWNER = 'summer-rain79';
+    const GH_REPO  = 'baby-feeding-tracker';
+    const GH_FILE  = 'data/records.json';
+    const GH_RAW   = `https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/main/${GH_FILE}`;
+    const GH_API   = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}`;
 
     function isUnlocked() {
       return sessionStorage.getItem('baby_feeding_unlocked') === 'true';
@@ -577,17 +583,50 @@
     }
 
     document.getElementById('btnUnlock').addEventListener('click', async () => {
-      const pw = document.getElementById('lockInput').value;
-      if (pw === LOCK_PASSWORD) {
+      const val = document.getElementById('lockInput').value.trim();
+      const errEl = document.getElementById('lockError');
+
+      if (val === LOCK_PASSWORD) {
+        // 只有密码，检查是否已有 token
+        if (!_ghToken) {
+          errEl.style.display = 'block';
+          errEl.textContent = '请粘贴你的 GitHub Token 以启用数据保存（只需输一次）';
+          return;
+        }
         setUnlocked(true);
         hideLockDialog();
-        showToast('✅ 已解锁，可以编辑了');
+        showToast('✅ 已解锁');
         await refreshAll();
-      } else {
-        const errEl = document.getElementById('lockError');
-        errEl.style.display = 'block';
-        errEl.textContent = '密码错误，请重试';
+        return;
       }
+
+      // 尝试作为 Token 验证
+      if (val.startsWith('ghp_') || val.startsWith('github_pat_')) {
+        errEl.style.display = 'block';
+        errEl.textContent = '⏳ 验证中...';
+        try {
+          const r = await fetch('https://api.github.com/user', {
+            headers: { 'Authorization': `Bearer ${val}`, 'Accept': 'application/vnd.github+json' }
+          });
+          if (r.ok) {
+            _ghToken = val;
+            localStorage.setItem('bf_gh_token', val);
+            setUnlocked(true);
+            hideLockDialog();
+            _recordsCache = null;
+            await refreshAll();
+            showToast('✅ 已解锁，Token 已保存');
+          } else {
+            errEl.textContent = '❌ Token 无效，请检查权限（需要 repo 权限）';
+          }
+        } catch (e) {
+          errEl.textContent = '❌ 网络错误，请重试';
+        }
+        return;
+      }
+
+      errEl.style.display = 'block';
+      errEl.textContent = '密码错误，或请粘贴 GitHub Token';
     });
 
     document.getElementById('lockInput').addEventListener('keydown', (e) => {
@@ -599,35 +638,15 @@
       showToast('当前为只读模式');
     });
 
-    // ==================== 数据管理（MantleDB 云存储，免费免注册） ====================
-    const DB_NS = 'baby-feeding-app';  // namespace
-    const DB_PATH = 'records';              // 数据路径
-    const DB_URL = `https://mantledb.sh/v2/${DB_NS}/${DB_PATH}`;
-
-    // 首次使用时声明 namespace 获取写保护 key
-    let _dbKey = localStorage.getItem('bf_db_key') || '';
-
-    async function ensureDbKey() {
-      if (_dbKey) return _dbKey;
-      try {
-        const res = await fetch(`https://mantledb.sh/v2/claim/${DB_NS}`);
-        const data = await res.json();
-        if (data.key) {
-          _dbKey = data.key;
-          localStorage.setItem('bf_db_key', _dbKey);
-        }
-      } catch (e) { /* 可能已被声明 */ }
-      return _dbKey;
-    }
+    // ==================== 数据管理（GitHub 仓库，永久可靠） ====================
 
     async function loadRecords() {
       if (_recordsCache) return _recordsCache;
       try {
-        const res = await fetch(`${DB_URL}?t=${Date.now()}`);
+        // 用 raw 链接读（无需 token，公开仓库直接访问）
+        const res = await fetch(`${GH_RAW}?t=${Date.now()}`);
         if (!res.ok) { _recordsCache = []; return _recordsCache; }
-        const text = await res.text();
-        if (!text || text.trim() === 'null') { _recordsCache = []; return _recordsCache; }
-        _recordsCache = JSON.parse(text);
+        _recordsCache = await res.json();
         if (!Array.isArray(_recordsCache)) _recordsCache = [];
         return _recordsCache;
       } catch (e) {
@@ -637,19 +656,40 @@
     }
 
     async function saveRecords(records) {
+      if (!_ghToken) throw new Error('no token');
       _recordsCache = records;
-      await ensureDbKey();
-      const headers = { 'Content-Type': 'application/json' };
-      if (_dbKey) headers['X-Mantle-Key'] = _dbKey;
-      const res = await fetch(DB_URL, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(records)
+      const json = JSON.stringify(records, null, 2);
+      const content = btoa(unescape(encodeURIComponent(json)));
+
+      // 获取最新 sha
+      if (!_fileSha) {
+        try {
+          const r = await fetch(GH_API, {
+            headers: { 'Authorization': `Bearer ${_ghToken}`, 'Accept': 'application/vnd.github+json' }
+          });
+          if (r.ok) { const d = await r.json(); _fileSha = d.sha; }
+        } catch (e) {}
+      }
+
+      const body = { message: 'update records', content, branch: 'main' };
+      if (_fileSha) body.sha = _fileSha;
+
+      const res = await fetch(GH_API, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${_ghToken}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
       });
       if (!res.ok) {
+        _fileSha = ''; // sha 可能已过期，下次重新获取
         const err = await res.text();
-        throw new Error(`保存失败: ${res.status} ${err}`);
+        throw new Error(`保存失败 ${res.status}: ${err}`);
       }
+      const d = await res.json();
+      _fileSha = d.content.sha; // 更新 sha
     }
 
     async function addRecord(dateStr, timeStr, ml, note) {
