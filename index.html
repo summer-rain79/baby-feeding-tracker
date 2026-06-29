@@ -1118,16 +1118,32 @@
 
     // 初始化
     initDateTime();
-    showLockDialog();
 
-    // 后台加载数据
+    // 先加载数据，再弹锁屏
     (async () => {
+      // 显示 loading 状态
+      document.getElementById('todayRecords').innerHTML =
+        '<div class="empty-state"><div class="icon">⏳</div><p>正在加载数据...</p></div>';
+
       try {
-        await loadRecords();
-        await refreshAll();
+        // 强制从 GitHub 拉最新数据（绕过内存缓存）
+        _recordsCache = null;
+        const res = await fetch(`${GH_RAW}?t=${Date.now()}`);
+        if (res.ok) {
+          const data = await res.json();
+          _recordsCache = Array.isArray(data) ? data : [];
+        } else {
+          _recordsCache = [];
+        }
       } catch (e) {
-        console.error('初始加载失败:', e);
+        console.error('数据加载失败:', e);
+        _recordsCache = [];
       }
+
+      // 数据加载完毕后刷新界面
+      await refreshAll();
+      // 再弹锁屏
+      showLockDialog();
     })();
   </script>
 </body>
