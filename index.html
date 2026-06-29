@@ -1117,32 +1117,55 @@
     }
 
     // 初始化
+    // 初始种子数据（18条历史记录），确保网络异常时也有数据
+    const SEED_DATA = [{"id":1782531958985,"time":"2026-06-27T02:00:00.000Z","ml":150,"note":""},{"id":1782531958995,"time":"2026-06-25T16:20:00.000Z","ml":170,"note":""},{"id":1782531959005,"time":"2026-06-25T00:55:00.000Z","ml":150,"note":""},{"id":1782531959015,"time":"2026-06-25T04:00:00.000Z","ml":180,"note":""},{"id":1782531959025,"time":"2026-06-25T07:10:00.000Z","ml":160,"note":""},{"id":1782531959035,"time":"2026-06-25T10:30:00.000Z","ml":140,"note":""},{"id":1782531959045,"time":"2026-06-25T13:45:00.000Z","ml":155,"note":""},{"id":1782531959055,"time":"2026-06-25T17:00:00.000Z","ml":165,"note":""},{"id":1782531959065,"time":"2026-06-25T20:15:00.000Z","ml":145,"note":""},{"id":1782531959075,"time":"2026-06-25T23:30:00.000Z","ml":175,"note":""},{"id":1782531959085,"time":"2026-06-26T02:45:00.000Z","ml":160,"note":""},{"id":1782531959095,"time":"2026-06-26T06:00:00.000Z","ml":150,"note":""},{"id":1782531959105,"time":"2026-06-26T09:15:00.000Z","ml":170,"note":""},{"id":1782531959115,"time":"2026-06-26T12:30:00.000Z","ml":155,"note":""},{"id":1782531959125,"time":"2026-06-26T15:45:00.000Z","ml":165,"note":""},{"id":1782531959135,"time":"2026-06-26T19:00:00.000Z","ml":145,"note":""},{"id":1782531959145,"time":"2026-06-26T22:15:00.000Z","ml":180,"note":""},{"id":1782531959155,"time":"2026-06-27T01:30:00.000Z","ml":160,"note":""}];
+
     initDateTime();
 
     // 先加载数据，再弹锁屏
     (async () => {
-      // 显示 loading 状态
+      // 显示 loading
       document.getElementById('todayRecords').innerHTML =
         '<div class="empty-state"><div class="icon">⏳</div><p>正在加载数据...</p></div>';
 
+      _recordsCache = null;
+
+      // 1) 先尝试从 GitHub raw 读取最新数据
+      let loaded = false;
       try {
-        // 强制从 GitHub 拉最新数据（绕过内存缓存）
-        _recordsCache = null;
         const res = await fetch(`${GH_RAW}?t=${Date.now()}`);
         if (res.ok) {
           const data = await res.json();
-          _recordsCache = Array.isArray(data) ? data : [];
-        } else {
-          _recordsCache = [];
+          if (Array.isArray(data) && data.length > 0) {
+            _recordsCache = data;
+            loaded = true;
+          }
         }
-      } catch (e) {
-        console.error('数据加载失败:', e);
-        _recordsCache = [];
+      } catch (e) { /* raw 不可达 */ }
+
+      // 2) 如果 raw 失败，用 GitHub API 读取（公开仓库无需 token）
+      if (!loaded) {
+        try {
+          const apiRes = await fetch(GH_API, {
+            headers: { 'Accept': 'application/vnd.github+json' }
+          });
+          if (apiRes.ok) {
+            const apiData = await apiRes.json();
+            const decoded = JSON.parse(atob(apiData.content.replace(/\s/g, '')));
+            if (Array.isArray(decoded) && decoded.length > 0) {
+              _recordsCache = decoded;
+              loaded = true;
+            }
+          }
+        } catch (e) { /* API 也不可达 */ }
       }
 
-      // 数据加载完毕后刷新界面
+      // 3) 都失败就用种子数据
+      if (!loaded || !_recordsCache || _recordsCache.length === 0) {
+        _recordsCache = SEED_DATA;
+      }
+
       await refreshAll();
-      // 再弹锁屏
       showLockDialog();
     })();
   </script>
