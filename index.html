@@ -1124,48 +1124,22 @@
 
     // 先加载数据，再弹锁屏
     (async () => {
-      // 显示 loading
-      document.getElementById('todayRecords').innerHTML =
-        '<div class="empty-state"><div class="icon">⏳</div><p>正在加载数据...</p></div>';
+      // 先用种子数据显示，确保不会空白
+      _recordsCache = SEED_DATA;
+      await refreshAll();
 
-      _recordsCache = null;
-
-      // 1) 先尝试从 GitHub raw 读取最新数据
-      let loaded = false;
+      // 后台尝试从 GitHub 拉取最新数据
       try {
         const res = await fetch(`${GH_RAW}?t=${Date.now()}`);
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data) && data.length > 0) {
             _recordsCache = data;
-            loaded = true;
+            await refreshAll();
           }
         }
-      } catch (e) { /* raw 不可达 */ }
+      } catch (e) { /* raw 不可达，种子数据已显示 */ }
 
-      // 2) 如果 raw 失败，用 GitHub API 读取（公开仓库无需 token）
-      if (!loaded) {
-        try {
-          const apiRes = await fetch(GH_API, {
-            headers: { 'Accept': 'application/vnd.github+json' }
-          });
-          if (apiRes.ok) {
-            const apiData = await apiRes.json();
-            const decoded = JSON.parse(atob(apiData.content.replace(/\s/g, '')));
-            if (Array.isArray(decoded) && decoded.length > 0) {
-              _recordsCache = decoded;
-              loaded = true;
-            }
-          }
-        } catch (e) { /* API 也不可达 */ }
-      }
-
-      // 3) 都失败就用种子数据
-      if (!loaded || !_recordsCache || _recordsCache.length === 0) {
-        _recordsCache = SEED_DATA;
-      }
-
-      await refreshAll();
       showLockDialog();
     })();
   </script>
